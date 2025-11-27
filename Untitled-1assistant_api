@@ -1,0 +1,85 @@
+<?php
+// assistant_api.php
+
+header('Content-Type: application/json');
+
+// 1. Récupérer la requête de l'utilisateur
+$userInput = $_POST['query'] ?? null;
+
+if (empty($userInput)) {
+    http_response_code(400); // Bad Request
+    echo json_encode(['error' => 'Requête vide']);
+    exit;
+}
+
+// 2. Définir le chemin vers votre script Python
+// NOTE IMPORTANTE : Remplacez 'python3' si nécessaire par le nom de la commande 
+// pour lancer Python sur votre serveur (ex: 'python', '/usr/bin/python3', etc.)
+$pythonCommand = 'python3';
+$assistantScript = 'libro_assistant.py'; 
+
+// 3. Échapper la requête pour la passer en argument et construire la commande
+$escapedInput = escapeshellarg($userInput);
+$command = "{$pythonCommand} {$assistantScript} {$escapedInput} 2>&1";
+// 2>&1 permet de capturer les erreurs de la console (stderr)
+
+$output = [];
+$return_var = 0;
+
+// 4. Exécuter la commande
+$last_line = exec($command, $output, $return_var);
+
+// 5. Analyser le résultat de l'exécution
+if ($return_var !== 0) {
+    // Échec de l'exécution Python (erreur, script non trouvé, etc.)
+    http_response_code(500);
+    $error_message = 'Erreur interne de l\'assistant Python.';
+    
+    // Tenter de lire l'erreur spécifique du script
+    if (!empty($output)) {
+        $error_message .= ' Détails: ' . implode("\n", $output);
+    } else {
+        $error_message .= ' Vérifiez le chemin de votre script Python et ses permissions d\'exécution.';
+    }
+
+    // Si l'erreur est liée à la catégorie, cela vient souvent d'un problème JSON
+    if (stripos($userInput, 'catégorie') !== false) {
+         $error_message .= ' (Erreur potentiellement liée à une réponse JSON non conforme)';
+    }
+
+    echo json_encode(['error' => $error_message, 'output' => $output]);
+    exit;
+
+} else {
+    // Succès, la sortie du script Python est dans $last_line ou $output
+    
+    // On suppose que votre script retourne la réponse JSON en dernière ligne
+    $json_response = trim($last_line); 
+
+    $decoded_response = json_decode($json_response, true);
+    
+    if (json_last_error() === JSON_ERROR_NONE && is_array($decoded_response)) {
+        // La réponse est un JSON valide, l'assistant a répondu avec une structure attendue
+        echo $json_response;
+    } else {
+        // Si ce n'est pas un JSON valide, il s'agit d'une réponse en texte brut ou d'une erreur non capturée
+        http_response_code(500);
+        
+        $assistant_response = implode("\n", $output);
+        
+        // On essaie de nettoyer la sortie (souvent, il y a des messages de logging)
+        // La vraie réponse de l'assistant dans votre `libro_assistant.py` commence par "🤖 Assistant: "
+        $match = [];
+        if (preg_match('/🤖 Assistant: (.*)$/s', $assistant_response, $match)) {
+             $final_response_text = trim($match[1]);
+        } else {
+            $final_response_text = $assistant_response;
+        }
+
+        echo json_encode([
+            'error' => "Réponse de l'assistant non conforme (non-JSON).",
+            'raw_output' => $final_response_text
+        ]);
+    }
+}
+?>
